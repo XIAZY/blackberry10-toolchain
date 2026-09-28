@@ -1,0 +1,11 @@
+.git
+.DS_Store
+arm
+arm-p
+x86
+build
+*.bar
+__pycache__
+
+# Legacy host-staged SDK payloads are not Docker build inputs.
+vendor/bbndk

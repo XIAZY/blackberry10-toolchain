@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+target=arm-unknown-nto-qnx6.5.0eabi
+failed=0
+
+check_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "error: missing command: $1" >&2
+        failed=1
+    fi
+}
+
+for command in \
+    clang \
+    clang++ \
+    "$target-ld" \
+    "$target-as" \
+    "$target-readelf" \
+    blackberry-nativepackager; do
+    check_command "$command"
+done
+
+if command -v qcc >/dev/null 2>&1; then
+    echo "error: qcc must not be present in the builder image" >&2
+    failed=1
+fi
+
+if [ ! -f "${QNX_TARGET:-/opt/bb10-sdk/target/qnx6}/usr/include/bb/cascades/Application" ] && \
+   [ ! -f "${QNX_TARGET:-/opt/bb10-sdk/target/qnx6}/usr/include/bb/cascades/Application.hpp" ]; then
+    echo "error: Cascades headers are missing from the target sysroot" >&2
+    failed=1
+fi
+
+if [ ! -e "${QNX_TARGET:-/opt/bb10-sdk/target/qnx6}/armle-v7/usr/lib/libbbcascades.so" ]; then
+    echo "error: libbbcascades.so is missing from the target sysroot" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+if ! "$target-ld" -V 2>&1 | grep -q armnto; then
+    echo "error: GNU ld does not contain armnto emulation" >&2
+    exit 1
+fi
+
+echo "modern compiler: $(clang++ --version | head -n 1)"
+echo "modern linker: $($target-ld --version | head -n 1)"
+echo "builder process architecture: $(uname -m)"
+echo "linker output profile: armnto (GNU ld calls this an emulation; no CPU emulation)"
+echo "qcc: absent"
+echo "BB10 Cascades SDK: present"
+
+if [ "${1:-}" != "--image-build" ]; then
+    echo "toolchain is ready"
+fi

@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+compile_only=0
+if [ "${1:-}" = "--compile-only" ]; then
+    compile_only=1
+    shift
+fi
+
+project=${1:-/src}
+project=$(cd "$project" && pwd)
+build_dir="$project/build/cmake"
+
+if [ ! -f "$project/CMakeLists.txt" ]; then
+    echo "error: no CMakeLists.txt in project: $project" >&2
+    exit 1
+fi
+
+cmake -S "$project" -B "$build_dir" \
+    -DCMAKE_TOOLCHAIN_FILE=/opt/bb10-toolchain.cmake \
+    -DCMAKE_BUILD_TYPE=Debug
+cmake --build "$build_dir" --parallel "${BB10_BUILD_JOBS:-2}"
+
+if [ "$compile_only" -eq 1 ]; then
+    exit 0
+fi
+
+descriptor="$project/bar-descriptor.xml"
+if [ ! -f "$descriptor" ]; then
+    echo "built: $project (no BAR descriptor; packaging skipped)"
+    exit 0
+fi
+
+package_id=$(python3 -c 'import sys, xml.etree.ElementTree as ET; root = ET.parse(sys.argv[1]).getroot(); print(root.find("{http://www.qnx.com/schemas/application/1.0}id").text)' "$descriptor")
+package="$project/build/$package_id.bar"
+configuration=${BB10_CONFIGURATION:-Device-Debug}
+cd "$project"
+if [ -n "${BB10_DEBUG_TOKEN:-}" ]; then
+    blackberry-nativepackager \
+        -devMode \
+        -debugToken "$BB10_DEBUG_TOKEN" \
+        -package "$package" \
+        "$descriptor" \
+        -configuration "$configuration"
+else
+    blackberry-nativepackager \
+        -devMode \
+        -package "$package" \
+        "$descriptor" \
+        -configuration "$configuration"
+fi
+
+echo "packaged: $package"

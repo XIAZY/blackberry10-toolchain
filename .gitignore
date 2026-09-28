@@ -1,0 +1,28 @@
+# BB10 / CMake build outputs
+**/arm/
+**/arm-p/
+**/x86/
+**/build/
+**/cmake-build-*/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/compile_commands.json
+translations/*.qm
+*.bar
+*.signed
+*.debugtoken
+
+# Local signing credentials (never commit private keys)
+*.p12
+
+# Editor and host tooling
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+
+# Obsolete host-staged SDK payload. Keep the provenance note.
+vendor/bbndk/*
+!vendor/bbndk/README.md

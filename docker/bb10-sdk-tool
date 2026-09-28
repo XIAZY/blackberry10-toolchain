@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+tool=$(basename "$0")
+executable="${BB10_HOST:-/opt/bb10-host}/usr/bin/$tool"
+
+if [ ! -x "$executable" ]; then
+    echo "error: BB10 SDK tool is unavailable: $tool" >&2
+    exit 127
+fi
+
+exec "$executable" "$@"

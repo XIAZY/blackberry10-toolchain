@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<qnx xmlns="http://www.qnx.com/schemas/application/1.0">
+    <id>com.example.bbcalculator</id>
+    <name>BB Calculator</name>
+    <versionNumber>1.0.6</versionNumber>
+    <buildId>7</buildId>
+    <description>A simple Cascades calculator.</description>
+    <author>Example Inc.</author>
+
+    <icon>
+        <image>assets/icon.png</image>
+    </icon>
+
+    <initialWindow>
+        <autoOrients>true</autoOrients>
+        <systemChrome>none</systemChrome>
+    </initialWindow>
+
+    <configuration name="Device-Debug">
+        <platformArchitecture>armle-v7</platformArchitecture>
+        <asset path="build/cmake/arm/o.le-v7-g/bb_hello" entry="true" type="Qnx/Elf">bb_hello</asset>
+    </configuration>
+
+    <asset path="assets">assets</asset>
+
+    <permission system="true">run_native</permission>
+    <env var="LD_LIBRARY_PATH" value="app/native/lib:/usr/lib/qt4/lib"/>
+</qnx>
