@@ -6,9 +6,7 @@ Page {
     }
 
     function send(command, argument) {
-        calculator.argument = argument
-        calculator.command = command
-        calculator.sequence = calculator.sequence + 1
+        calculator.send(command, argument)
     }
 
     Container {

@@ -37,6 +37,18 @@ if [ ! -e "${QNX_TARGET:-/opt/bb10-sdk/target/qnx6}/armle-v7/usr/lib/libbbcascad
     failed=1
 fi
 
+for tool in "moc -v" "rcc -version" "uic -v"; do
+    if ! /opt/bb10-qt4/bin/$tool 2>&1 | grep -q "version.* 4\.8\.6"; then
+        echo "error: Qt 4.8.6 ${tool%% *} is missing or does not run" >&2
+        failed=1
+    fi
+done
+
+if [ ! -f /opt/bb10-toolchain/lib/libclang_rt.builtins-armv7.a ]; then
+    echo "error: compiler-rt builtins for armv7 are missing" >&2
+    failed=1
+fi
+
 if [ "$failed" -ne 0 ]; then
     exit 1
 fi
@@ -52,6 +64,20 @@ echo "builder process architecture: $(uname -m)"
 echo "linker output profile: armnto (GNU ld calls this an emulation; no CPU emulation)"
 echo "qcc: absent"
 echo "BB10 Cascades SDK: present"
+echo "Qt host tools: $(/opt/bb10-qt4/bin/moc -v 2>&1)"
+
+# Configure, moc, compile and link a probe with the real toolchain file and link
+# rules: QNX predefines, ABI sizes, a Q_OBJECT class and every runtime helper.
+selftest=$(mktemp -d)
+if ! cmake -S /opt/bb10-cmake/selftest -B "$selftest" \
+        -DCMAKE_TOOLCHAIN_FILE=/opt/bb10-toolchain.cmake >"$selftest.log" 2>&1 || \
+   ! cmake --build "$selftest" >>"$selftest.log" 2>&1; then
+    cat "$selftest.log" >&2
+    echo "error: toolchain self-test failed" >&2
+    exit 1
+fi
+rm -rf "$selftest" "$selftest.log"
+echo "self-test: moc, QNX ABI checks and runtime helpers link"
 
 if [ "${1:-}" != "--image-build" ]; then
     echo "toolchain is ready"
