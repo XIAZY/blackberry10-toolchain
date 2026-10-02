@@ -80,9 +80,44 @@ cmake_minimum_required(VERSION 3.20)
 project(my_app LANGUAGES CXX)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/arm/o.le-v7-g")
-add_executable(my_app src/main.cpp src/controller.cpp)
+
+include(BB10Qt4)
+qt4_wrap_cpp(MOC_SOURCES src/controller.h)
+
+add_executable(my_app src/main.cpp src/controller.cpp ${MOC_SOURCES})
 target_link_libraries(my_app PRIVATE bbcascades QtDeclarative QtCore)
 ```
+
+### Qt classes: moc, rcc, uic
+
+Signals, slots, `Q_PROPERTY` and `Q_INVOKABLE` (everything QML calls into C++)
+need moc. The image has Qt 4.8.6's `moc`, `rcc` and `uic`, the Qt version on
+BB10 10.3 devices, under `/opt/bb10-qt4/bin`. `include(BB10Qt4)` provides:
+
+- `qt4_wrap_cpp(<var> <header>... [OPTIONS ...])` runs moc on headers that
+  declare `Q_OBJECT` classes and adds the generated sources to `<var>`.
+- `qt4_add_resources(<var> <qrc>... [OPTIONS ...])` compiles `.qrc` files.
+
+QML files usually ship as plain assets (`asset:///main.qml`) and need neither.
+
+## Install on a phone
+
+**If the phone is rooted with bb10mt, use the phone's own installer.** It is
+preferred over the Java `blackberry-deploy` tool: it needs no Development Mode
+password, no legacy-TLS workarounds and no Java on the host.
+`tools/install-rooted.sh` copies the BAR over SSH and runs the installer script
+the phone ships, `sud_install_package_2` from `/base/scripts/sudtools.sh`:
+
+```sh
+./tools/install-rooted.sh root@<phone-ip> examples/calculator/build/com.example.bbcalculator.bar
+```
+
+The SSH target must reach a root shell on the phone. A BAR installed this way is
+an unsigned development package, and runs like any other app.
+
+On a phone that is not rooted, use `blackberry-deploy` from the image. The
+phone must be in Development Mode. BB10 only speaks TLS 1.0 with legacy ciphers,
+so the image's Java needs its TLS restrictions lifted for that call.
 
 The default package configuration is `Device-Debug`; override it with
 `BB10_CONFIGURATION` if the descriptor defines a different configuration:
@@ -101,9 +136,26 @@ image. The resulting native executable targets `/usr/lib/ldqnx.so.2` on the
 device; the linker’s `armnto` emulation selects the QNX ARM object format and is
 not CPU emulation.
 
+`armv7-none-eabi` is a bare-metal triple, so the image fills what clang does not
+assume about QNX:
+
+- **OS macros.** The toolchain file defines `__QNX__`, `__QNXNTO__`, `__unix__`
+  and `__unix`, as `qcc` does. Portable libraries pick their POSIX code from
+  `__unix__`.
+- **Run-time helpers.** Clang calls ARM run-time ABI functions for memory
+  copies and 64-bit/floating-point conversions (`__aeabi_memcpy`,
+  `__aeabi_memclr`, `__aeabi_d2lz`, `__aeabi_l2d`, ...). BB10's libc only
+  exports the integer division ones. The image builds compiler-rt's builtins
+  for the BB10 ABI (ARMv7, VFPv3-D16, softfp) and links them after `-lc`, so
+  they only supply what libc lacks.
+- **ABI check.** `bb10-toolchain-doctor` (also run while building the image)
+  builds a probe with the real toolchain file. It checks QNX's ARM ABI sizes
+  (4-byte enums and `wchar_t`, 8-byte `long long`/`double` alignment, softfp),
+  runs moc on a `Q_OBJECT` class and links every runtime helper against Qt.
+
 - `examples/calculator/` — example source, assets, CMake definition, and BAR descriptor
 - `docker/` — shared compiler/linker setup and generic build helpers
-- `tools/` — host-side Docker wrapper and project checker
+- `tools/` — host-side Docker wrapper, project checker and rooted-phone installer
 - `Dockerfile` — self-contained builder image definition
 - `docker-bake.hcl` — Buildx target for building/tagging the image
 

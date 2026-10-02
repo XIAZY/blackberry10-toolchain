@@ -1,51 +1,20 @@
 #include "calculatorcontroller.h"
 
-#include <QtCore/QTimerEvent>
 #include <float.h>
 #include <math.h>
 #include <limits>
 
 CalculatorController::CalculatorController(QObject *parent)
-    : QDeclarativePropertyMap(parent),
+    : QObject(parent),
+      m_display("0"),
       m_accumulator(0.0),
       m_pendingOperator(),
-      m_startNewEntry(true),
-      m_lastSequence(0),
-      m_timerId(0)
+      m_startNewEntry(true)
 {
-    insert("display", QString("0"));
-    insert("expression", QString());
-    insert("command", QString());
-    insert("argument", QString());
-    insert("sequence", m_lastSequence);
-
-    // QDeclarativePropertyMap provides the dynamic properties consumed by QML.
-    // A short timer lets this class receive QML property writes without needing
-    // a separately generated Qt meta-object (moc), which the BB10 Linux SDK omits.
-    m_timerId = startTimer(16);
 }
 
-void CalculatorController::timerEvent(QTimerEvent *event)
+void CalculatorController::send(const QString &command, const QString &argument)
 {
-    if (event->timerId() == m_timerId) {
-        processCommand();
-        return;
-    }
-
-    QDeclarativePropertyMap::timerEvent(event);
-}
-
-void CalculatorController::processCommand()
-{
-    const int sequence = value("sequence").toInt();
-    if (sequence == m_lastSequence) {
-        return;
-    }
-
-    m_lastSequence = sequence;
-    const QString command = value("command").toString();
-    const QString argument = value("argument").toString();
-
     if (command == "clear") {
         clear();
     } else if (command == "digit") {
@@ -74,7 +43,7 @@ void CalculatorController::clear()
 
 void CalculatorController::enterDigit(const QString &digit)
 {
-    QString current = value("display").toString();
+    QString current = m_display;
     if (current == "Error" || m_startNewEntry) {
         setDisplay(digit);
         m_startNewEntry = false;
@@ -89,7 +58,7 @@ void CalculatorController::enterDigit(const QString &digit)
 
 void CalculatorController::enterDecimal()
 {
-    const QString current = value("display").toString();
+    const QString current = m_display;
     if (current == "Error" || m_startNewEntry) {
         setDisplay("0.");
         m_startNewEntry = false;
@@ -120,9 +89,11 @@ QString CalculatorController::formatResult(double value) const
 double CalculatorController::calculate(double left, double right, const QString &op) const
 {
     if (op == "+") return left + right;
-    if (op == "−") return left - right;
-    if (op == "×") return left * right;
-    if (op == "÷") {
+    // Qt 4 reads plain C string literals as Latin-1, so compare the UTF-8
+    // operator symbols explicitly.
+    if (op == QString::fromUtf8("−")) return left - right;
+    if (op == QString::fromUtf8("×")) return left * right;
+    if (op == QString::fromUtf8("÷")) {
         return right == 0.0 ? std::numeric_limits<double>::quiet_NaN() : left / right;
     }
     return right;
@@ -135,12 +106,12 @@ bool CalculatorController::isFinite(double value) const
 
 void CalculatorController::chooseOperator(const QString &op)
 {
-    if (value("display").toString() == "Error") {
+    if (m_display == "Error") {
         clear();
     }
 
     bool ok = false;
-    double current = value("display").toString().toDouble(&ok);
+    double current = m_display.toDouble(&ok);
     if (!ok) {
         current = 0.0;
     }
@@ -164,7 +135,7 @@ void CalculatorController::chooseOperator(const QString &op)
 
 void CalculatorController::showResult()
 {
-    const QString display = value("display").toString();
+    const QString display = m_display;
     if (m_pendingOperator.isEmpty() || display == "Error") {
         return;
     }
@@ -182,7 +153,7 @@ void CalculatorController::showResult()
 
 void CalculatorController::changeSign()
 {
-    const QString current = value("display").toString();
+    const QString current = m_display;
     if (current != "0" && current != "Error") {
         setDisplay(current.startsWith('-') ? current.mid(1) : "-" + current);
     }
@@ -190,7 +161,7 @@ void CalculatorController::changeSign()
 
 void CalculatorController::deleteDigit()
 {
-    const QString current = value("display").toString();
+    const QString current = m_display;
     if (current == "Error" || m_startNewEntry || current.length() <= 1 ||
         (current.length() == 2 && current.startsWith('-'))) {
         setDisplay("0");
@@ -202,10 +173,16 @@ void CalculatorController::deleteDigit()
 
 void CalculatorController::setDisplay(const QString &text)
 {
-    insert("display", text);
+    if (text != m_display) {
+        m_display = text;
+        emit displayChanged();
+    }
 }
 
 void CalculatorController::setExpression(const QString &text)
 {
-    insert("expression", text);
+    if (text != m_expression) {
+        m_expression = text;
+        emit expressionChanged();
+    }
 }
