@@ -79,6 +79,18 @@ fi
 rm -rf "$selftest" "$selftest.log"
 echo "self-test: moc, QNX ABI checks and runtime helpers link"
 
+# The gcc-compatible driver used by cgo and other "cc"-driven builds.
+probe=$(mktemp -d)
+printf '#include <stdio.h>\nint main(void) { return printf("ok") < 0; }\n' > "$probe/c.c"
+printf '#include <QString>\nint main() { return QString("ok").size() != 2; }\n' > "$probe/cxx.cpp"
+if ! bb10-cc -O2 -o "$probe/c" "$probe/c.c" || \
+   ! bb10-c++ -O2 -o "$probe/cxx" "$probe/cxx.cpp" -lQtCore; then
+    echo "error: bb10-cc/bb10-c++ cannot build a program" >&2
+    exit 1
+fi
+rm -rf "$probe"
+echo "bb10-cc/bb10-c++: C and C++ programs link"
+
 if [ "${1:-}" != "--image-build" ]; then
     echo "toolchain is ready"
 fi

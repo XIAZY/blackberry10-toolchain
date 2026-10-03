@@ -18,12 +18,15 @@ scp -q "$bar" "$host:$remote"
 
 # sud_install_package_2 comes from the phone's /base/scripts/sudtools.sh. The
 # phone's sh lacks many utilities, so run it under ksh, and judge success by
-# its log line rather than its exit status.
-output=$(ssh "$host" "/bin/ksh -c '. /base/scripts/sudtools.sh; sud_install_package_2 -T 120 -D -p \"$remote\"'; rm -f \"$remote\"" 2>&1) || true
+# its log line rather than its exit status. The first install after a reboot
+# can take minutes. The BAR is only removed once the installer is done with
+# it; deleting it under a slow install breaks that install.
+output=$(ssh "$host" "/bin/ksh -c '. /base/scripts/sudtools.sh; sud_install_package_2 -T 600 -D -p \"$remote\"'" 2>&1) || true
 if printf '%s\n' "$output" | grep -q "Sucessfully installed"; then
+    ssh "$host" "rm -f \"$remote\""
     echo "installed: $(basename "$bar") on $host"
 else
     printf '%s\n' "$output" >&2
-    echo "error: installation failed" >&2
+    echo "error: installation failed; $remote is left on the phone" >&2
     exit 1
 fi

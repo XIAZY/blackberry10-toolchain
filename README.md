@@ -14,6 +14,18 @@ The SDK, compiler, linker, packager, and build utilities are installed or
 assembled inside the Docker image. The host needs no BB10 SDK, QNX compiler, or
 cross-toolchain.
 
+## Prebuilt image
+
+GitHub Actions builds the image for amd64 and arm64 (`.github/workflows/image.yml`)
+and publishes it as `ghcr.io/xiazy/blackberry10-toolchain`: `latest` follows
+`main`, and every build is also tagged with its commit (`sha-<short>`) and any
+`v*` tag. To use it instead of building locally:
+
+```sh
+docker pull ghcr.io/xiazy/blackberry10-toolchain:latest
+BB10_BUILDER_IMAGE=ghcr.io/xiazy/blackberry10-toolchain:latest ./tools/docker-builder.sh build
+```
+
 ## Build the builder image
 
 From the repository root, run:
@@ -99,6 +111,18 @@ BB10 10.3 devices, under `/opt/bb10-qt4/bin`. `include(BB10Qt4)` provides:
 - `qt4_add_resources(<var> <qrc>... [OPTIONS ...])` compiles `.qrc` files.
 
 QML files usually ship as plain assets (`asset:///main.qml`) and need neither.
+
+### Other build tools: bb10-cc
+
+`bb10-cc` and `bb10-c++` are gcc-compatible drivers for BB10, and the one place
+that holds the compile and link flags. They compile with the image's clang and
+link with the armnto GNU ld, adding the QNX loader, startup files, libraries and
+runtime helpers. The CMake toolchain uses them, and so can anything else that
+drives `cc`, such as cgo:
+
+```sh
+CC=bb10-cc CXX=bb10-c++ CGO_ENABLED=1 GOOS=qnx GOARCH=arm GOARM=7 go build
+```
 
 ## Install on a phone
 
