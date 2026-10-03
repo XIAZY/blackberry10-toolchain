@@ -70,6 +70,8 @@ def link(args):
             shared = True
         elif a == "-rdynamic":
             ld_args.append("--export-dynamic")
+        elif a in ("-s", "-S"):
+            ld_args.append(a)  # strip all / strip debug info, at link time
         elif a in TWO_ARG and i + 1 < len(args):
             cflags += [a, args[i + 1]]; i += 1
         elif a.endswith(SOURCE_EXT) and not a.startswith("-"):
