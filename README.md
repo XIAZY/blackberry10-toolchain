@@ -100,6 +100,18 @@ BB10 10.3 devices, under `/opt/bb10-qt4/bin`. `include(BB10Qt4)` provides:
 
 QML files usually ship as plain assets (`asset:///main.qml`) and need neither.
 
+### Other build tools: bb10-cc
+
+`bb10-cc` and `bb10-c++` are gcc-compatible drivers for BB10, and the one place
+that holds the compile and link flags. They compile with the image's clang and
+link with the armnto GNU ld, adding the QNX loader, startup files, libraries and
+runtime helpers. The CMake toolchain uses them, and so can anything else that
+drives `cc`, such as cgo:
+
+```sh
+CC=bb10-cc CXX=bb10-c++ CGO_ENABLED=1 GOOS=qnx GOARCH=arm GOARM=7 go build
+```
+
 ## Install on a phone
 
 **If the phone is rooted with bb10mt, use the phone's own installer.** It is

@@ -214,6 +214,7 @@ COPY docker/bb10-toolchain-doctor /usr/local/bin/bb10-toolchain-doctor
 COPY docker/bb10-toolchain.cmake /opt/bb10-toolchain.cmake
 COPY docker/BB10LinkRules.cmake /opt/bb10-cmake/BB10LinkRules.cmake
 COPY docker/BB10Qt4.cmake /opt/bb10-cmake/BB10Qt4.cmake
+COPY docker/bb10-cc /usr/local/bin/bb10-cc
 COPY docker/selftest/ /opt/bb10-cmake/selftest/
 COPY tools/check-project.py /usr/local/bin/bb10-check-project
 
@@ -229,7 +230,9 @@ RUN chmod +x \
         /usr/local/libexec/bb10-sdk-tool \
         /usr/local/bin/bb10-build \
         /usr/local/bin/bb10-toolchain-doctor \
-        /usr/local/bin/bb10-check-project && \
+        /usr/local/bin/bb10-check-project \
+        /usr/local/bin/bb10-cc && \
+    ln -s bb10-cc /usr/local/bin/bb10-c++ && \
     /usr/local/sbin/install-bb10-sdk && \
     clang --version | grep -q "clang version ${LLVM_VERSION%%.*}\." || \
         { echo "clang is not LLVM ${LLVM_VERSION%%.*}; update LLVM_VERSION" >&2; exit 1; } && \
