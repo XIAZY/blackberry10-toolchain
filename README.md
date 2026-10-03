@@ -14,6 +14,18 @@ The SDK, compiler, linker, packager, and build utilities are installed or
 assembled inside the Docker image. The host needs no BB10 SDK, QNX compiler, or
 cross-toolchain.
 
+## Prebuilt image
+
+GitHub Actions builds the image for amd64 and arm64 (`.github/workflows/image.yml`)
+and publishes it as `ghcr.io/xiazy/blackberry10-toolchain`: `latest` follows
+`main`, and every build is also tagged with its commit (`sha-<short>`) and any
+`v*` tag. To use it instead of building locally:
+
+```sh
+docker pull ghcr.io/xiazy/blackberry10-toolchain:latest
+BB10_BUILDER_IMAGE=ghcr.io/xiazy/blackberry10-toolchain:latest ./tools/docker-builder.sh build
+```
+
 ## Build the builder image
 
 From the repository root, run:
