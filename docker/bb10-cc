@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""gcc-compatible C/C++ driver for BB10 (QNX 6.6, ARMv7, softfp).
+"""gcc-compatible C/C++ driver for BB10 (QNX 6.6).
 
-The single place that knows how to build for BB10. clang has no QNX linker
-driver, so this compiles with clang for the bare-metal armv7-none-eabi triple
-plus the BB10 sysroot flags, and links with the armnto GNU ld. Invoked as
-bb10-c++, it compiles C++ and links the C++ runtime. The CMake toolchain uses
-it as its compiler and linker; cgo uses it as CC/CXX.
+The single place that knows how to build for BB10. QNX_ARCH chooses the
+architecture: arm (the default; ARMv7, softfp: the phones) or x86 (the BB10
+simulator). clang has no QNX linker driver. For arm this compiles with clang
+for the bare-metal armv7-none-eabi triple plus the BB10 sysroot flags, and
+links with the armnto GNU ld. For x86 it compiles for the i386 SysV ABI with
+the Linux-specific parts of clang's driver turned off, and links with lld.
+Invoked as bb10-c++, it compiles C++ and links the C++ runtime. The CMake
+toolchain uses it as its compiler and linker; cgo uses it as CC/CXX.
+
+x86 programs have only been built, never run: there is no BB10 simulator
+to run them on.
 """
 import os
 import subprocess
@@ -13,21 +19,37 @@ import sys
 import tempfile
 
 TARGET = os.environ.get("QNX_TARGET", "/opt/bb10-sdk/target/qnx6")
+ARCH = os.environ.get("QNX_ARCH", "arm")
+if ARCH not in ("arm", "x86"):
+    sys.exit("bb10-cc: QNX_ARCH must be arm or x86, not " + ARCH)
+X86 = ARCH == "x86"
 BINUTILS = "/opt/bb10-toolchain/bin/arm-unknown-nto-qnx6.5.0eabi-"
-BUILTINS = "/opt/bb10-toolchain/lib/libclang_rt.builtins-armv7.a"
-LIB = TARGET + "/armle-v7/lib"
-USR_LIB = TARGET + "/armle-v7/usr/lib"
+BUILTINS = ("/opt/bb10-toolchain/lib/bb10-x86/libclang_rt.builtins-i386.a" if X86
+            else "/opt/bb10-toolchain/lib/libclang_rt.builtins-armv7.a")
+LIB = TARGET + ("/x86/lib" if X86 else "/armle-v7/lib")
+USR_LIB = TARGET + ("/x86/usr/lib" if X86 else "/armle-v7/usr/lib")
 QT_LIB = USR_LIB + "/qt4/lib"
 CXX = os.path.basename(sys.argv[0]).endswith("++")
 
 
 def compile_flags():
     resource = subprocess.run(["clang", "-print-resource-dir"], capture_output=True, text=True, check=True).stdout.strip()
-    flags = ["--target=armv7-none-eabi", "-fPIC", "-marm", "-mcpu=cortex-a9", "-mfpu=vfpv3-d16",
-             "-mfloat-abi=softfp", "-mno-unaligned-access", "-Wno-pragma-pack", "-fstack-protector", "-nostdinc",
-             "-D__QNX__", "-D__QNXNTO__", "-D__unix__", "-D__unix", "-D__ARM__", "-D__LITTLEENDIAN__",
-             "-D_QNX_SOURCE", "-isystem", resource + "/include",
-             "-isystem", "/opt/bb10-target-override/usr/include"]
+    if X86:
+        # The guard is BB10 libc's __stack_chk_guard, not the %gs slot that
+        # clang's Linux target reads. Thread-local storage is emulated, as
+        # QNX's loader has no TLS segment.
+        flags = ["--target=i386-pc-linux-gnu", "-march=i686", "-fPIC", "-mstack-alignment=4",
+                 "-femulated-tls", "-mstack-protector-guard=global",
+                 "-U__linux__", "-U__linux", "-Ulinux", "-U__gnu_linux__", "-Uunix",
+                 "-U__FLOAT128__", "-U__SIZEOF_FLOAT128__", "-D__X86__", "-D__ELF__",
+                 "-Wno-unused-command-line-argument"]
+    else:
+        flags = ["--target=armv7-none-eabi", "-fPIC", "-marm", "-mcpu=cortex-a9", "-mfpu=vfpv3-d16",
+                 "-mfloat-abi=softfp", "-mno-unaligned-access", "-D__ARM__"]
+    flags += ["-Wno-pragma-pack", "-fstack-protector", "-nostdinc",
+              "-D__QNX__", "-D__QNXNTO__", "-D__unix__", "-D__unix", "-D__LITTLEENDIAN__",
+              "-D_QNX_SOURCE", "-isystem", resource + "/include",
+              "-isystem", "/opt/bb10-target-override/usr/include"]
     if CXX:
         flags += ["-std=gnu++98", "-fno-exceptions", "-fno-rtti", "-DQT_NO_EXCEPTIONS",
                   "-isystem", TARGET + "/usr/include/cpp", "-isystem", TARGET + "/usr/include/cpp/c"]
@@ -90,13 +112,14 @@ def link(args):
             if clang(keep + ["-c", src, "-o", obj]) != 0:
                 return 1
             objs.append(obj)
-        common = ["-m", "armnto", "-z", "noexecstack", "-rpath-link", LIB, "-rpath-link", USR_LIB,
+        ld = "ld.lld" if X86 else BINUTILS + "ld"
+        common = ["-m", "elf_i386" if X86 else "armnto", "-z", "noexecstack", "-rpath-link", LIB, "-rpath-link", USR_LIB,
                   "-rpath-link", QT_LIB, "-L" + LIB, "-L" + LIB + "/gcc/4.6.3", "-L" + USR_LIB, "-L" + QT_LIB]
         runtime = (["-lcpp"] if CXX else []) + ["-lm", "-lc", BUILTINS]
         if shared:
-            cmd = [BINUTILS + "ld", "-shared"] + common + ld_args + ["-o", out] + objs + libs + [BUILTINS]
+            cmd = [ld, "-shared"] + common + ld_args + ["-o", out] + objs + libs + [BUILTINS]
         else:
-            cmd = ([BINUTILS + "ld", "--dynamic-linker", "/usr/lib/ldqnx.so.2", "--hash-style=sysv"] + common
+            cmd = ([ld, "--dynamic-linker", "/usr/lib/ldqnx.so.2", "--hash-style=sysv"] + common
                    + ld_args + ["-o", out, LIB + "/crt1.o", LIB + "/crti.o"] + objs + libs
                    + runtime[:-2] + ["-lbps"] + runtime[-2:]
                    + [LIB + "/crtn.o"])

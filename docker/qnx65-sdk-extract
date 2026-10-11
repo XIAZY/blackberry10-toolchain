@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Extract the QNX 6.5.0 SDK files the image uses from QNX's Linux installer.
+
+usage: qnx65-sdk-extract INSTALLER MANIFEST DEST
+       qnx65-sdk-extract INSTALLER              (list the installer's files)
+
+The installer (qnxsdp-6.5.0-x86-*-linux.bin, a public download from qnx.com)
+is an InstallShield archive: a launcher followed by a zip. Each installed file
+is a zip entry named by its MD5 and holding a zlib stream, and an index maps
+install paths to those entries. Nothing in it is encrypted, so this reads the
+zip and the index directly; it does not run the installer.
+
+MANIFEST lists the files to take, one "SHA256  path" a line, as sha256sum
+prints them. Exactly those are written under DEST, and each is checked against
+its SHA-256, so the result is the pinned set of files or an error.
+"""
+import hashlib
+import os
+import re
+import struct
+import sys
+import zipfile
+import zlib
+
+EMPTY = "d41d8cd98f00b204e9800998ecf8427e"  # MD5 of nothing: named, but not in this archive
+
+
+def load(installer):
+    archive = zipfile.ZipFile(installer)
+    top = next(n for n in archive.namelist() if n.endswith("/index"))[:-len("index")]
+    raw = archive.read(top + "index")
+    # The index: an 8-byte header, then zlib streams, each after its length.
+    offset, index = 8, b""
+    while offset < len(raw):
+        (size,) = struct.unpack(">I", raw[offset:offset + 4])
+        index += zlib.decompress(raw[offset + 4:offset + 4 + size])
+        offset += 4 + size
+    entries = {n[len(top) + 4:] for n in archive.namelist() if n.startswith(top + "md5/")}
+    # A file's record: its MD5 (16 bytes), the path (2-byte length, then the
+    # text), then its attributes, which start with the type, 2.
+    files = {}
+    for match in re.finditer(rb"(?:qnx6|x86)/[ -~]+", index):
+        start = match.start()
+        (length,) = struct.unpack(">H", index[start - 2:start])
+        path = index[start:start + length]
+        digest = index[start - 18:start - 2].hex()
+        if (len(path) == length and match.group()[:length] == path and digest in entries and digest != EMPTY
+                and index[start + length:start + length + 4] == b"\0\0\0\2"):
+            files[path.decode("latin-1")] = top + "md5/" + digest
+    # Directories have records of the same shape: a path that is the parent of
+    # another path is one.
+    parents = {p.rsplit("/", i)[0] for p in files for i in range(1, p.count("/") + 1)}
+    return archive, {p: e for p, e in files.items() if p not in parents}
+
+
+def main():
+    if len(sys.argv) not in (2, 4):
+        sys.exit(__doc__.strip())
+    archive, files = load(sys.argv[1])
+    if len(sys.argv) == 2:
+        print("\n".join(sorted(files)))
+        return 0
+    manifest, dest = sys.argv[2], sys.argv[3]
+    count = 0
+    with open(manifest) as lines:
+        for line in lines:
+            if not line.strip() or line.startswith("#"):
+                continue
+            wanted, path = line.split(None, 1)
+            path = path.strip().lstrip("*")
+            if path not in files:
+                sys.exit("qnx65-sdk-extract: %s is not in the installer" % path)
+            data = zlib.decompress(archive.read(files[path]))
+            if hashlib.sha256(data).hexdigest() != wanted:
+                sys.exit("qnx65-sdk-extract: %s does not have the SHA-256 in %s" % (path, manifest))
+            out = os.path.join(dest, path)
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "wb") as f:
+                f.write(data)
+            count += 1
+    print("qnx65-sdk-extract: %d files, all with the SHA-256 in %s" % (count, manifest))
+    return 0
+
+
+sys.exit(main())

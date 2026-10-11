@@ -51,7 +51,7 @@ FROM debian:trixie-slim AS bb10-target
 
 # This archive contains the host-independent BB10 10.3.1 QNX sysroot:
 # Cascades/Qt headers, ARM libraries, and the QNX CRT objects. Its x86 half
-# (the simulator's) is what qnx65-cc builds QNX 6.5.0 programs against; the
+# is BB10 for the simulator: the bb10-x86 target (QNX_ARCH=x86 bb10-cc). The
 # Qt and Cascades libraries of that half are left out.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends unzip && \
@@ -78,6 +78,31 @@ RUN mkdir -p /sdk && \
     test -f /sdk/target_10_3_1_995/qnx6/x86/lib/crt1.o && \
     test -f /sdk/target_10_3_1_995/qnx6/x86/lib/libc.so.3 && \
     test -e /sdk/target_10_3_1_995/qnx6/armle-v7/usr/lib/libbbcascades.so
+
+FROM debian:trixie-slim AS qnx65-sdk
+
+# QNX 6.5.0 is a system of its own, with its own SDK: its headers, x86
+# libraries and start-up files, and gcc 4.4.2's crtbegin/crtend and libgcc,
+# come from QNX's Linux installer for the SDP, a public download. The
+# installer is not run: qnx65-sdk-extract reads the files out of it, and
+# takes exactly those listed in qnx65-sdk.sha256, each checked against its
+# SHA-256. The installer has no ARM target libraries.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY docker/qnx65-sdk-extract docker/qnx65-sdk.sha256 /tmp/
+
+# qnx.com answers slowly and through two redirects, hence curl with retries
+# rather than ADD.
+RUN curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 60 -o /tmp/qnxsdp-linux.bin \
+        https://www.qnx.com/download/download/23649/qnxsdp-6.5.0-x86-201007091524-linux.bin && \
+    echo "25dd6c5c84fb70e8e2ba61e2e5c489be5ba9f6741144ae42c976cf91f002f2f2  /tmp/qnxsdp-linux.bin" | sha256sum -c - && \
+    python3 /tmp/qnx65-sdk-extract /tmp/qnxsdp-linux.bin /tmp/qnx65-sdk.sha256 /sdk && \
+    rm /tmp/qnxsdp-linux.bin && \
+    test -f /sdk/qnx6/usr/include/sys/neutrino.h && \
+    test -f /sdk/qnx6/x86/lib/libc.so.3 && \
+    test -f /sdk/x86/usr/lib/gcc/i486-pc-nto-qnx6.5.0/4.4.2/crtbegin.o
 
 FROM debian:trixie-slim AS binutils-build
 
@@ -191,16 +216,15 @@ RUN mkdir -p /tmp/src && cd /tmp/src && \
             grep -q " T $helper\$" || { echo "missing $helper" >&2; exit 1; }; \
     done
 
-# QNX 6.5.0 x86 (qnx65-cc): the SDK's x86 half has no libgcc and no
-# crtbegin/crtend. compiler-rt's builtins supply the 64-bit arithmetic and
-# emulated thread-local storage (__emutls_get_address); its crtbegin/crtend,
-# built without CRT_HAS_INITFINI_ARRAY, run constructors from .ctors, which is
-# the only way the 6.5.0 loader runs them. The flags are qnx65-cc's.
+# BB10 x86 (QNX_ARCH=x86 bb10-cc): the SDK's x86 half has no libgcc either.
+# compiler-rt's builtins supply the 64-bit arithmetic and the emulated
+# thread-local storage (__emutls_get_address). The flags are bb10-cc's for
+# x86, without the stack protector: the builtins must not need it themselves.
 RUN cd /tmp/src && \
-    flags="-march=i486 -mstack-alignment=4 -fno-omit-frame-pointer -fno-stack-protector \
-        -fPIC -O2 -nostdinc -U__linux__ -U__linux -Ulinux -U__gnu_linux__ -Uunix -U__FLOAT128__ \
-        -U__SIZEOF_FLOAT128__ -D__QNX__ -D__QNXNTO__ -D__unix__ -D__unix -D__ELF__ -D__X86__ -D__i386__ \
-        -D__LITTLEENDIAN__ -D_QNX_SOURCE -Dstatic_assert=_Static_assert \
+    flags="-march=i686 -mstack-alignment=4 -fno-stack-protector -fPIC -O2 -nostdinc \
+        -U__linux__ -U__linux -Ulinux -U__gnu_linux__ -Uunix -U__FLOAT128__ -U__SIZEOF_FLOAT128__ \
+        -D__QNX__ -D__QNXNTO__ -D__unix__ -D__unix -D__ELF__ -D__X86__ -D__LITTLEENDIAN__ -D_QNX_SOURCE \
+        -Dstatic_assert=_Static_assert \
         -isystem $(clang -print-resource-dir)/include -isystem /tmp/qnx6-include" && \
     flags=$(echo $flags) && \
     cmake -S "compiler-rt-${LLVM_VERSION}.src/lib/builtins" -B /tmp/build-x86 \
@@ -219,17 +243,13 @@ RUN cd /tmp/src && \
         -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
         -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
         -DCOMPILER_RT_BUILTINS_HIDE_SYMBOLS=ON \
-        -DCOMPILER_RT_OS_DIR=qnx65 \
+        -DCOMPILER_RT_OS_DIR=bb10 \
         -DLLVM_CMAKE_DIR=/tmp/src/llvm/cmake/modules && \
     cmake --build /tmp/build-x86 -j"$(nproc)" --target clang_rt.builtins-i386 && \
-    install -D -m 644 /tmp/build-x86/lib/qnx65/libclang_rt.builtins-i386.a \
-        /out/qnx65-x86/libclang_rt.builtins-i386.a && \
-    for crt in crtbegin crtend; do \
-        clang --target=i386-pc-linux-gnu $flags -fno-use-init-array \
-            -c "compiler-rt-${LLVM_VERSION}.src/lib/builtins/$crt.c" -o "/out/qnx65-x86/$crt.o" || exit 1; \
-    done && \
-    llvm-nm /out/qnx65-x86/libclang_rt.builtins-i386.a 2>/dev/null | grep -q " [TW] __emutls_get_address\$" && \
-    llvm-readelf -S /out/qnx65-x86/crtbegin.o | grep -q "\.ctors"
+    install -D -m 644 /tmp/build-x86/lib/bb10/libclang_rt.builtins-i386.a \
+        /out/bb10-x86/libclang_rt.builtins-i386.a && \
+    llvm-nm /out/bb10-x86/libclang_rt.builtins-i386.a 2>/dev/null | grep -q " [TW] __emutls_get_address\$" && \
+    ln -s . /out/bb10-arm
 
 FROM debian:trixie-slim AS bb10-builder
 
@@ -269,8 +289,8 @@ COPY docker/BB10Qt4.cmake /opt/bb10-cmake/BB10Qt4.cmake
 COPY docker/bb10-cc /usr/local/bin/bb10-cc
 COPY docker/qnx65-cc /usr/local/bin/qnx65-cc
 COPY docker/qnx65-check-names /usr/local/bin/qnx65-check-names
-COPY docker/qnx65-symbols/ /opt/bb10-toolchain/share/qnx65-symbols/
-COPY docker/qnx65-stack-protector.c /opt/bb10-toolchain/share/qnx65-stack-protector.c
+COPY docker/qnx65-sdk.sha256 /opt/bb10-toolchain/share/qnx65-sdk.sha256
+COPY --from=qnx65-sdk /sdk/ /opt/qnx65-sdk/
 COPY docker/selftest/ /opt/bb10-cmake/selftest/
 COPY tools/check-project.py /usr/local/bin/bb10-check-project
 
@@ -292,8 +312,6 @@ RUN chmod +x \
         /usr/local/bin/qnx65-check-names && \
     ln -s bb10-cc /usr/local/bin/bb10-c++ && \
     /usr/local/sbin/install-bb10-sdk && \
-    qnx65-cc -O2 -fPIC -c /opt/bb10-toolchain/share/qnx65-stack-protector.c \
-        -o /opt/bb10-toolchain/lib/qnx65-x86/stack-protector.o && \
     clang --version | grep -q "clang version ${LLVM_VERSION%%.*}\." || \
         { echo "clang is not LLVM ${LLVM_VERSION%%.*}; update LLVM_VERSION" >&2; exit 1; } && \
     bb10-toolchain-doctor --image-build
