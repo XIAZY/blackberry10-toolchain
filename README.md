@@ -148,6 +148,43 @@ One command per system, and `QNX_ARCH` chooses the architecture for both:
 The CMake toolchain file, `bb10-build`, the packager and the Qt tools are for
 `bb10-arm` only.
 
+### Use it from your own project
+
+Nothing but Docker is needed: no SDK, no compiler and no licence key. The
+drivers behave like `gcc`, so a project that builds with `make CC=...` builds
+unchanged. From the project's directory:
+
+```sh
+# QNX 6.5.0 on x86
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/src -w /src \
+    ghcr.io/xiazy/blackberry10-toolchain:latest \
+    make CC=qnx65-cc AR=llvm-ar STRIP=llvm-strip
+
+# BlackBerry 10 on ARM
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/src -w /src \
+    ghcr.io/xiazy/blackberry10-toolchain:latest \
+    make CC=bb10-cc AR=llvm-ar STRIP=llvm-strip
+```
+
+In GitHub Actions, run the job in the image, one target per matrix entry:
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: ghcr.io/xiazy/blackberry10-toolchain:latest
+    strategy:
+      matrix:
+        cc: [qnx65-cc, bb10-cc]
+    steps:
+      - uses: actions/checkout@v4
+      - run: make CC=${{ matrix.cc }} AR=llvm-ar STRIP=llvm-strip
+```
+
+`latest` follows `main`. For a build that does not change under you, name the
+image by digest instead, in either form:
+`ghcr.io/xiazy/blackberry10-toolchain@sha256:<digest>`.
+
 ### bb10-x86
 
 ```sh
