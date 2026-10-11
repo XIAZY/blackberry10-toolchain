@@ -93,10 +93,17 @@ RUN apt-get update && \
 
 COPY docker/qnx65-sdk-extract docker/qnx65-sdk.sha256 /tmp/
 
-# qnx.com answers slowly and through two redirects, hence curl with retries
-# rather than ADD.
-RUN curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 60 -o /tmp/qnxsdp-linux.bin \
-        https://www.qnx.com/download/download/23649/qnxsdp-6.5.0-x86-201007091524-linux.bin && \
+# www.qnx.com only redirects, to QNX's download server, and does not answer
+# every network (GitHub's runners time out connecting to it). So the download
+# server is asked directly first, and www.qnx.com is the fallback; either way
+# the file is checked against its SHA-256. curl with retries rather than ADD:
+# both are slow to answer.
+RUN for url in \
+        https://fusion.qnx.com/9/23649/qnxsdp-6.5.0-x86-201007091524-linux.bin \
+        https://www.qnx.com/download/download/23649/qnxsdp-6.5.0-x86-201007091524-linux.bin; do \
+        curl -fsSL --retry 3 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+            -o /tmp/qnxsdp-linux.bin "$url" && break; \
+    done && \
     echo "25dd6c5c84fb70e8e2ba61e2e5c489be5ba9f6741144ae42c976cf91f002f2f2  /tmp/qnxsdp-linux.bin" | sha256sum -c - && \
     python3 /tmp/qnx65-sdk-extract /tmp/qnxsdp-linux.bin /tmp/qnx65-sdk.sha256 /sdk && \
     rm /tmp/qnxsdp-linux.bin && \
