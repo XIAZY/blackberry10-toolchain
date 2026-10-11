@@ -49,6 +49,22 @@ if [ ! -f /opt/bb10-toolchain/lib/libclang_rt.builtins-armv7.a ]; then
     failed=1
 fi
 
+if [ ! -f /opt/bb10-toolchain/lib/bb10-x86/libclang_rt.builtins-i386.a ]; then
+    echo "error: compiler-rt builtins for BB10 x86 are missing" >&2
+    failed=1
+fi
+
+if [ ! -f "${QNX_TARGET:-/opt/bb10-sdk/target/qnx6}/x86/lib/crt1.o" ]; then
+    echo "error: the x86 half of the BB10 target sysroot is missing" >&2
+    failed=1
+fi
+
+# The QNX 6.5.0 SDK is exactly the files pinned in qnx65-sdk.sha256.
+if ! (cd /opt/qnx65-sdk && sha256sum -c --quiet /opt/bb10-toolchain/share/qnx65-sdk.sha256) >/dev/null 2>&1; then
+    echo "error: the QNX 6.5.0 SDK does not match qnx65-sdk.sha256" >&2
+    failed=1
+fi
+
 if [ "$failed" -ne 0 ]; then
     exit 1
 fi
@@ -90,6 +106,79 @@ if ! bb10-cc -O2 -o "$probe/c" "$probe/c.c" || \
 fi
 rm -rf "$probe"
 echo "bb10-cc/bb10-c++: C and C++ programs link"
+
+# BB10 x86 (the simulator): a C program, a shared library and a C++ program
+# link. There is no simulator to run them on, so this is a build check only.
+probe=$(mktemp -d)
+printf '#include <stdio.h>\nint main(void) { return printf("ok") < 0; }\n' > "$probe/c.c"
+printf 'static __thread int n;\nlong long lib(long long a, long long b) { return a / b + n++; }\n' > "$probe/lib.c"
+printf 'struct A { virtual ~A() {} int v; };\nint main() { A *a = new A; int r = a->v; delete a; return r * 0; }\n' > "$probe/cxx.cpp"
+if ! QNX_ARCH=x86 bb10-cc -O2 -o "$probe/c" "$probe/c.c" || \
+   ! QNX_ARCH=x86 bb10-cc -O2 -shared -o "$probe/libprobe.so" "$probe/lib.c" || \
+   ! QNX_ARCH=x86 bb10-c++ -O2 -o "$probe/cxx" "$probe/cxx.cpp"; then
+    echo "error: bb10-cc/bb10-c++ cannot build for x86" >&2
+    exit 1
+fi
+if ! llvm-readelf -h -l "$probe/c" | grep -q 'Intel 80386' || \
+   ! llvm-readelf -l "$probe/c" | grep -q '/usr/lib/ldqnx.so.2'; then
+    echo "error: QNX_ARCH=x86 bb10-cc did not make an i386 QNX program" >&2
+    exit 1
+fi
+rm -rf "$probe"
+echo "bb10-cc/bb10-c++ for x86: C and C++ programs and a shared library link (not run: no simulator)"
+
+# QNX 6.5.0 (x86): a program, a shared library with a constructor, a
+# thread-local variable and 64-bit division, and a program that pulls regcomp
+# from the static libc link against QNX 6.5.0's own SDK. Linking against
+# 6.5.0's libraries is what keeps a program to what 6.5.0 has: a function that
+# only BB10 has must fail to link. qnx65-check-names confirms the result
+# against the SDK's libraries.
+probe=$(mktemp -d)
+cat > "$probe/lib.c" <<'EOF'
+#include <unistd.h>
+static __thread int counter;
+static volatile int pid;
+__attribute__((constructor)) static void init(void) { pid = getpid(); }
+int probe_pid(void) { return pid + counter++; }
+unsigned long long probe_div(unsigned long long a, unsigned long long b) { return a / b; }
+EOF
+cat > "$probe/main.c" <<'EOF'
+#include <stdio.h>
+int probe_pid(void);
+unsigned long long probe_div(unsigned long long, unsigned long long);
+int main(int argc, char **argv) { return printf("%d %llu\n", probe_pid(), probe_div(argc, 3)) < 0; }
+EOF
+printf 'unsigned strnlen(const char *, unsigned);\nint main(int argc, char **argv) { return (int)strnlen(argv[0], 8); }\n' > "$probe/bb10only.c"
+printf '#include <regex.h>\nint main(int argc, char **argv) { regex_t r; return regcomp(&r, argv[0], 0); }\n' > "$probe/static.c"
+if ! qnx65-cc -O2 -fPIC -shared -Wl,-soname,libprobe.so.1 -o "$probe/libprobe.so.1" "$probe/lib.c" || \
+   ! qnx65-cc -O2 -o "$probe/main" "$probe/main.c" "$probe/libprobe.so.1" || \
+   ! qnx65-cc -O2 -o "$probe/static" "$probe/static.c"; then
+    echo "error: qnx65-cc cannot build a program" >&2
+    exit 1
+fi
+if qnx65-cc -O2 -fno-builtin -o "$probe/bb10only" "$probe/bb10only.c" 2>/dev/null; then
+    echo "error: qnx65-cc linked a function QNX 6.5.0 does not have (strnlen)" >&2
+    exit 1
+fi
+# 12 bytes of .ctors: the list's two end markers and one entry, for lib.c's
+# one constructor.
+if [ "$(llvm-readelf -S "$probe/libprobe.so.1" | awk '$2 == ".ctors" { print $6 }')" != 00000c ]; then
+    echo "error: qnx65-cc did not put the constructor in .ctors" >&2
+    exit 1
+fi
+libc=/opt/qnx65-sdk/qnx6/x86/lib/libc.so.3
+if ! qnx65-check-names "$probe/main" "$probe/libprobe.so.1" "$libc" >/dev/null || \
+   ! qnx65-check-names "$probe/libprobe.so.1" "$libc" >/dev/null || \
+   ! qnx65-check-names "$probe/static" "$libc" >/dev/null; then
+    echo "error: a qnx65-cc program needs names QNX 6.5.0's libc lacks" >&2
+    exit 1
+fi
+if QNX_ARCH=arm qnx65-cc -c "$probe/main.c" -o "$probe/arm.o" 2>/dev/null; then
+    echo "error: qnx65-cc accepted QNX_ARCH=arm, which is not provided" >&2
+    exit 1
+fi
+rm -rf "$probe"
+echo "qnx65-cc: a QNX 6.5.0 x86 program and shared library link against the 6.5.0 SDK; a BB10-only function does not"
 
 if [ "${1:-}" != "--image-build" ]; then
     echo "toolchain is ready"

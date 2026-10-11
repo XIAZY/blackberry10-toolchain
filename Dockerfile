@@ -50,7 +50,9 @@ RUN dd if=/tmp/bbndk-installer.bin of=/tmp/resource.zip \
 FROM debian:trixie-slim AS bb10-target
 
 # This archive contains the host-independent BB10 10.3.1 QNX sysroot:
-# Cascades/Qt headers, ARM libraries, and the QNX CRT objects.
+# Cascades/Qt headers, ARM libraries, and the QNX CRT objects. Its x86 half
+# is BB10 for the simulator: the bb10-x86 target (QNX_ARCH=x86 bb10-cc). The
+# Qt and Cascades libraries of that half are left out.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends unzip && \
     rm -rf /var/lib/apt/lists/*
@@ -65,10 +67,42 @@ RUN mkdir -p /sdk && \
         'target_10_3_1_995/qnx6/armle-v7/*' \
         'target_10_3_1_995/target-override/usr/include/*' \
         'target_10_3_1_995/target-override/armle-v7/*' \
+        'target_10_3_1_995/qnx6/x86/lib/*' \
+        'target_10_3_1_995/qnx6/x86/usr/lib/*' \
+        -x 'target_10_3_1_995/qnx6/x86/usr/lib/qt4/*' \
+           'target_10_3_1_995/qnx6/x86/usr/lib/libbb*' \
+           'target_10_3_1_995/qnx6/x86/usr/lib/libQt*' \
         -d /sdk && \
     test -f /sdk/target_10_3_1_995/qnx6/usr/include/bb/cascades/Application && \
     test -f /sdk/target_10_3_1_995/qnx6/armle-v7/lib/crt1.o && \
+    test -f /sdk/target_10_3_1_995/qnx6/x86/lib/crt1.o && \
+    test -f /sdk/target_10_3_1_995/qnx6/x86/lib/libc.so.3 && \
     test -e /sdk/target_10_3_1_995/qnx6/armle-v7/usr/lib/libbbcascades.so
+
+FROM debian:trixie-slim AS qnx65-sdk
+
+# QNX 6.5.0 is a system of its own, with its own SDK: its headers, x86
+# libraries and start-up files, and gcc 4.4.2's crtbegin/crtend and libgcc,
+# come from QNX's Linux installer for the SDP, a public download. The
+# installer is not run: qnx65-sdk-extract reads the files out of it, and
+# takes exactly those listed in qnx65-sdk.sha256, each checked against its
+# SHA-256. The installer has no ARM target libraries.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY docker/qnx65-sdk-extract docker/qnx65-sdk.sha256 /tmp/
+
+# qnx.com answers slowly and through two redirects, hence curl with retries
+# rather than ADD.
+RUN curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 60 -o /tmp/qnxsdp-linux.bin \
+        https://www.qnx.com/download/download/23649/qnxsdp-6.5.0-x86-201007091524-linux.bin && \
+    echo "25dd6c5c84fb70e8e2ba61e2e5c489be5ba9f6741144ae42c976cf91f002f2f2  /tmp/qnxsdp-linux.bin" | sha256sum -c - && \
+    python3 /tmp/qnx65-sdk-extract /tmp/qnxsdp-linux.bin /tmp/qnx65-sdk.sha256 /sdk && \
+    rm /tmp/qnxsdp-linux.bin && \
+    test -f /sdk/qnx6/usr/include/sys/neutrino.h && \
+    test -f /sdk/qnx6/x86/lib/libc.so.3 && \
+    test -f /sdk/x86/usr/lib/gcc/i486-pc-nto-qnx6.5.0/4.4.2/crtbegin.o
 
 FROM debian:trixie-slim AS binutils-build
 
@@ -146,10 +180,11 @@ ADD --checksum=sha256:96f833c6ad99a3e8e1d9aca5f439b8fd2c7efdcf83b664e0af1c0712c5
     /tmp/llvm.tar.xz
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends clang cmake make xz-utils && \
+    apt-get install -y --no-install-recommends clang cmake llvm make xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=binutils-build /opt/bb10-toolchain/ /opt/bb10-toolchain/
+COPY --from=bb10-target /sdk/target_10_3_1_995/qnx6/usr/include/ /tmp/qnx6-include/
 
 RUN mkdir -p /tmp/src && cd /tmp/src && \
     tar -xJf /tmp/compiler-rt.tar.xz && \
@@ -181,6 +216,41 @@ RUN mkdir -p /tmp/src && cd /tmp/src && \
             grep -q " T $helper\$" || { echo "missing $helper" >&2; exit 1; }; \
     done
 
+# BB10 x86 (QNX_ARCH=x86 bb10-cc): the SDK's x86 half has no libgcc either.
+# compiler-rt's builtins supply the 64-bit arithmetic and the emulated
+# thread-local storage (__emutls_get_address). The flags are bb10-cc's for
+# x86, without the stack protector: the builtins must not need it themselves.
+RUN cd /tmp/src && \
+    flags="-march=i686 -mstack-alignment=4 -fno-stack-protector -fPIC -O2 -nostdinc \
+        -U__linux__ -U__linux -Ulinux -U__gnu_linux__ -Uunix -U__FLOAT128__ -U__SIZEOF_FLOAT128__ \
+        -D__QNX__ -D__QNXNTO__ -D__unix__ -D__unix -D__ELF__ -D__X86__ -D__LITTLEENDIAN__ -D_QNX_SOURCE \
+        -Dstatic_assert=_Static_assert \
+        -isystem $(clang -print-resource-dir)/include -isystem /tmp/qnx6-include" && \
+    flags=$(echo $flags) && \
+    cmake -S "compiler-rt-${LLVM_VERSION}.src/lib/builtins" -B /tmp/build-x86 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_SYSTEM_NAME=Linux \
+        -DCMAKE_SYSTEM_PROCESSOR=i386 \
+        -DCMAKE_C_COMPILER=clang \
+        -DCMAKE_ASM_COMPILER=clang \
+        -DCMAKE_C_COMPILER_TARGET=i386-pc-linux-gnu \
+        -DCMAKE_ASM_COMPILER_TARGET=i386-pc-linux-gnu \
+        -DCMAKE_C_FLAGS="$flags" \
+        -DCMAKE_ASM_FLAGS="$flags" \
+        -DCMAKE_AR="$(command -v llvm-ar)" \
+        -DCMAKE_NM="$(command -v llvm-nm)" \
+        -DCMAKE_RANLIB="$(command -v llvm-ranlib)" \
+        -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+        -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+        -DCOMPILER_RT_BUILTINS_HIDE_SYMBOLS=ON \
+        -DCOMPILER_RT_OS_DIR=bb10 \
+        -DLLVM_CMAKE_DIR=/tmp/src/llvm/cmake/modules && \
+    cmake --build /tmp/build-x86 -j"$(nproc)" --target clang_rt.builtins-i386 && \
+    install -D -m 644 /tmp/build-x86/lib/bb10/libclang_rt.builtins-i386.a \
+        /out/bb10-x86/libclang_rt.builtins-i386.a && \
+    llvm-nm /out/bb10-x86/libclang_rt.builtins-i386.a 2>/dev/null | grep -q " [TW] __emutls_get_address\$" && \
+    ln -s . /out/bb10-arm
+
 FROM debian:trixie-slim AS bb10-builder
 
 ARG BINUTILS_VERSION
@@ -195,6 +265,8 @@ RUN apt-get update && \
         clang \
         cmake \
         default-jre-headless \
+        lld \
+        llvm \
         make \
         python3 \
         unzip \
@@ -215,6 +287,10 @@ COPY docker/bb10-toolchain.cmake /opt/bb10-toolchain.cmake
 COPY docker/BB10LinkRules.cmake /opt/bb10-cmake/BB10LinkRules.cmake
 COPY docker/BB10Qt4.cmake /opt/bb10-cmake/BB10Qt4.cmake
 COPY docker/bb10-cc /usr/local/bin/bb10-cc
+COPY docker/qnx65-cc /usr/local/bin/qnx65-cc
+COPY docker/qnx65-check-names /usr/local/bin/qnx65-check-names
+COPY docker/qnx65-sdk.sha256 /opt/bb10-toolchain/share/qnx65-sdk.sha256
+COPY --from=qnx65-sdk /sdk/ /opt/qnx65-sdk/
 COPY docker/selftest/ /opt/bb10-cmake/selftest/
 COPY tools/check-project.py /usr/local/bin/bb10-check-project
 
@@ -231,7 +307,9 @@ RUN chmod +x \
         /usr/local/bin/bb10-build \
         /usr/local/bin/bb10-toolchain-doctor \
         /usr/local/bin/bb10-check-project \
-        /usr/local/bin/bb10-cc && \
+        /usr/local/bin/bb10-cc \
+        /usr/local/bin/qnx65-cc \
+        /usr/local/bin/qnx65-check-names && \
     ln -s bb10-cc /usr/local/bin/bb10-c++ && \
     /usr/local/sbin/install-bb10-sdk && \
     clang --version | grep -q "clang version ${LLVM_VERSION%%.*}\." || \
