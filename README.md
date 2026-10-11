@@ -182,7 +182,7 @@ jobs:
 ```
 
 `latest` follows `main`. For a build that does not change under you, name the
-image by digest instead, in either form:
+image by digest instead:
 `ghcr.io/xiazy/blackberry10-toolchain@sha256:<digest>`.
 
 ### bb10-x86
