@@ -49,6 +49,18 @@ if [ ! -f /opt/bb10-toolchain/lib/libclang_rt.builtins-armv7.a ]; then
     failed=1
 fi
 
+for file in libclang_rt.builtins-i386.a stack-protector.o crtbegin.o crtend.o; do
+    if [ ! -f "/opt/bb10-toolchain/lib/qnx65-x86/$file" ]; then
+        echo "error: compiler-rt $file for QNX 6.5.0 x86 is missing" >&2
+        failed=1
+    fi
+done
+
+if [ ! -f "${QNX_TARGET:-/opt/bb10-sdk/target/qnx6}/x86/lib/crt1.o" ]; then
+    echo "error: the x86 half of the target sysroot is missing" >&2
+    failed=1
+fi
+
 if [ "$failed" -ne 0 ]; then
     exit 1
 fi
@@ -90,6 +102,53 @@ if ! bb10-cc -O2 -o "$probe/c" "$probe/c.c" || \
 fi
 rm -rf "$probe"
 echo "bb10-cc/bb10-c++: C and C++ programs link"
+
+# QNX 6.5.0 (x86): a program and a shared library with a constructor, a
+# thread-local variable and 64-bit division link from the SDK's x86 half and
+# use only what 6.5.0's libraries have. The check must also catch a program
+# that uses a BB10-only function.
+probe=$(mktemp -d)
+cat > "$probe/lib.c" <<'EOF'
+#include <unistd.h>
+static __thread int counter;
+static volatile int pid;
+__attribute__((constructor)) static void init(void) { pid = getpid(); }
+int probe_pid(void) { return pid + counter++; }
+unsigned long long probe_div(unsigned long long a, unsigned long long b) { return a / b; }
+EOF
+cat > "$probe/main.c" <<'EOF'
+#include <stdio.h>
+int probe_pid(void);
+unsigned long long probe_div(unsigned long long, unsigned long long);
+int main(int argc, char **argv) { return printf("%d %llu\n", probe_pid(), probe_div(argc, 3)) < 0; }
+EOF
+printf '#include <string.h>\nint main(int argc, char **argv) { return (int)strnlen(argv[0], 8); }\n' > "$probe/bb10only.c"
+# regcomp is only in the static libc, whose objects use the stack protector.
+printf '#include <regex.h>\nint main(int argc, char **argv) { regex_t r; return regcomp(&r, argv[0], 0); }\n' > "$probe/static.c"
+if ! qnx65-cc -O2 -fPIC -shared -Wl,-soname,libprobe.so.1 -o "$probe/libprobe.so.1" "$probe/lib.c" || \
+   ! qnx65-cc -O2 -o "$probe/main" "$probe/main.c" "$probe/libprobe.so.1" || \
+   ! qnx65-cc -O2 -o "$probe/static" "$probe/static.c" || \
+   ! qnx65-cc -O2 -fno-builtin -o "$probe/bb10only" "$probe/bb10only.c"; then
+    echo "error: qnx65-cc cannot build a program" >&2
+    exit 1
+fi
+if ! llvm-readelf -S "$probe/libprobe.so.1" | grep -q '\.ctors'; then
+    echo "error: qnx65-cc did not put the constructor in .ctors" >&2
+    exit 1
+fi
+names=/opt/bb10-toolchain/share/qnx65-symbols
+if ! qnx65-check-names "$probe/main" "$probe/libprobe.so.1" "$names/libc.so.3.txt" >/dev/null || \
+   ! qnx65-check-names "$probe/libprobe.so.1" "$names/libc.so.3.txt" >/dev/null || \
+   ! qnx65-check-names "$probe/static" "$names/libc.so.3.txt" >/dev/null; then
+    echo "error: a qnx65-cc program needs symbols QNX 6.5.0 lacks" >&2
+    exit 1
+fi
+if qnx65-check-names "$probe/bb10only" "$names/libc.so.3.txt" >/dev/null 2>&1; then
+    echo "error: qnx65-check-names accepted a BB10-only function (strnlen)" >&2
+    exit 1
+fi
+rm -rf "$probe"
+echo "qnx65-cc: a QNX 6.5.0 x86 program and shared library link; qnx65-check-names works"
 
 if [ "${1:-}" != "--image-build" ]; then
     echo "toolchain is ready"

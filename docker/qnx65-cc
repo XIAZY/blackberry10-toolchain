@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""gcc-compatible C driver for QNX 6.5.0 (x86).
+
+Builds for QNX Neutrino 6.5.0 from the x86 half of the BB10 SDK, whose C
+library is a superset of 6.5.0's. clang compiles for the i386 SysV ABI with
+the Linux-specific parts of its driver turned off, and lld links. What gcc
+would supply comes from compiler-rt: the builtins (64-bit arithmetic, emulated
+thread-local storage) and crtbegin/crtend, built for .ctors. Arguments are
+passed to clang in the order given, so --start-group and the like work.
+
+A program built this way runs on 6.5.0 only while it uses nothing that
+BB10's libraries have and 6.5.0's lack; qnx65-check-names verifies that
+against the lists in /opt/bb10-toolchain/share/qnx65-symbols.
+"""
+import os
+import subprocess
+import sys
+
+TARGET = os.environ.get("QNX_TARGET", "/opt/bb10-sdk/target/qnx6")
+RUNTIME = "/opt/bb10-toolchain/lib/qnx65-x86"
+BUILTINS = RUNTIME + "/libclang_rt.builtins-i386.a"
+STACK_PROTECTOR = RUNTIME + "/stack-protector.o"
+LIB = TARGET + "/x86/lib"
+USR_LIB = TARGET + "/x86/usr/lib"
+
+
+def compile_flags():
+    resource = subprocess.run(["clang", "-print-resource-dir"], capture_output=True, text=True, check=True).stdout.strip()
+    # -march=i486: the default of QNX 6.5.0's own compiler; no SSE. A later
+    #   -march or -msse2 on the command line overrides it.
+    # -mstack-alignment=4: 6.5.0 only guarantees a 4-byte aligned stack, so
+    #   code that needs more (SSE) realigns it itself.
+    # -femulated-tls: the 6.5.0 loader has no PT_TLS support.
+    # -fno-use-init-array: constructors go in .ctors, run by crtbegin.o from
+    #   DT_INIT; the 6.5.0 loader does not run DT_INIT_ARRAY.
+    # -fno-stack-protector: 6.5.0's libc has no __stack_chk_fail.
+    # _QNX_SOURCE: as bb10-cc passes it. Under a strict C standard
+    #   (-std=c11 rather than gnu11) QNX's headers hide POSIX without it.
+    return ["--target=i386-pc-linux-gnu", "-march=i486", "-fno-pic",
+            "-mstack-alignment=4", "-fno-omit-frame-pointer", "-femulated-tls", "-fno-use-init-array",
+            "-fno-stack-protector", "-nostdinc",
+            "-U__linux__", "-U__linux", "-Ulinux", "-U__gnu_linux__", "-Uunix",
+            "-U__FLOAT128__", "-U__SIZEOF_FLOAT128__",
+            "-D__QNX__", "-D__QNXNTO__", "-D__unix__", "-D__unix", "-D__ELF__", "-D__X86__", "-D__i386__",
+            "-D__LITTLEENDIAN__", "-D_QNX_SOURCE", "-Wno-unused-command-line-argument",
+            "-isystem", resource + "/include", "-isystem", TARGET + "/usr/include"]
+
+
+def link_flags():
+    # The shape of the 6.5.0 compiler's output: SysV hash, DT_RPATH, no RELRO
+    # or GNU_STACK segments, read-only data in the text segment. The builtins
+    # stay private to each program and library (--exclude-libs).
+    return ["-fuse-ld=lld", "-nostdlib", "-Wl,--hash-style=sysv", "-Wl,--disable-new-dtags", "-Wl,-z,norelro",
+            "-Wl,-z,nognustack", "-Wl,--no-rosegment", "-Wl,--build-id=none",
+            "-Wl,--exclude-libs,libclang_rt.builtins-i386.a",
+            "-L" + LIB, "-L" + USR_LIB, "-Wl,-rpath-link=" + LIB + ":" + USR_LIB]
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a != "-pie"]  # 6.5.0 programs are not position independent
+    cmd = ["clang"] + compile_flags()
+    if not args or any(a in ("-c", "-S", "-E", "-M", "-MM", "-fsyntax-only", "--version", "-v", "-dumpversion",
+                             "-dumpmachine") or a.startswith("-print-") for a in args):
+        cmd += args + ["-fno-stack-protector"]
+    elif "-shared" in args:
+        # libcS.a holds the parts of libc that shared objects link statically.
+        # Its objects use the stack protector, whose runtime 6.5.0's libc
+        # lacks: stack-protector.o supplies it.
+        cmd += (["-fPIC"] + link_flags() + [LIB + "/crti.o", RUNTIME + "/crtbegin.o"] + args
+                + ["-fno-stack-protector", "-x", "none", BUILTINS, "-lc", "-Wl,-Bstatic", "-lcS", "-Wl,-Bdynamic",
+                   STACK_PROTECTOR, BUILTINS, RUNTIME + "/crtend.o", LIB + "/crtn.o"])
+    else:
+        # The static libc follows the shared one: some libc functions (popen,
+        # glob, ...) are only in libc.a.
+        cmd += (link_flags() + ["-no-pie", "-Wl,--dynamic-linker=/usr/lib/ldqnx.so.2", "-Wl,--image-base=0x08048000",
+                                LIB + "/crt1.o", LIB + "/crti.o", RUNTIME + "/crtbegin.o"] + args
+                + ["-fno-stack-protector", "-x", "none", BUILTINS, "-lc", "-Wl,-Bstatic", "-lc", "-Wl,-Bdynamic",
+                   STACK_PROTECTOR, BUILTINS, RUNTIME + "/crtend.o", LIB + "/crtn.o"])
+    if os.environ.get("QNX65_CC_VERBOSE"):
+        print(" ".join(cmd), file=sys.stderr)
+    return subprocess.call(cmd)
+
+
+sys.exit(main())

@@ -124,6 +124,57 @@ drives `cc`, such as cgo:
 CC=bb10-cc CXX=bb10-c++ CGO_ENABLED=1 GOOS=qnx GOARCH=arm GOARM=7 go build
 ```
 
+## QNX 6.5.0 on x86: qnx65-cc
+
+BB10 is built on QNX Neutrino 6.5, and the SDK also has an x86 half, made for
+the BB10 simulator. Its C library exports everything QNX 6.5.0's does, bar a
+dozen internal helpers, so a program built against it can run on QNX 6.5.0
+itself. `qnx65-cc` is a gcc-compatible C driver for that: clang compiles for
+the i386 SysV ABI, lld links, and compiler-rt supplies what gcc would (64-bit
+arithmetic, emulated thread-local storage, and `crtbegin`/`crtend` built for
+`.ctors`, the only constructors the 6.5.0 loader runs).
+
+```sh
+qnx65-cc -O2 -o hello hello.c
+qnx65-cc -O2 -fPIC -shared -Wl,-soname,libfoo.so.1 -o libfoo.so.1 foo.c
+make CC=qnx65-cc AR=llvm-ar STRIP=llvm-strip
+```
+
+The reverse does not hold: BB10's libraries export a few hundred names that
+6.5.0's lack (`strnlen`, `getopt_long`, `inotify_*`, `dl_iterate_phdr`, the
+stack protector, ...). A program that uses one links without a warning and
+then fails to load on 6.5.0. `qnx65-check-names` catches that: give it the
+program, then what it may take names from, your own shared libraries and the
+lists of what QNX 6.5.0's libraries export:
+
+```sh
+names=/opt/bb10-toolchain/share/qnx65-symbols
+qnx65-check-names hello libfoo.so.1 $names/libc.so.3.txt $names/libsocket.so.3.txt
+```
+
+It prints every undefined symbol and copied data symbol outside those, and
+exits with status 1. The lists (`libc.so.3`, `libm.so.2`, `libsocket.so.3`,
+`libz.so.2`) hold only the names exported by the libraries of a QNX 6.5.0
+installation.
+
+What the driver sets, and why:
+
+- **`-march=i486`**, no SSE: the default of QNX 6.5.0's own compiler. Pass
+  `-march=i686 -msse2 -mfpmath=sse` for a Pentium 4 or later; later flags win.
+- **`-fno-stack-protector`**: 6.5.0's libc has no `__stack_chk_fail`. The SDK's
+  static libc, which holds functions the shared one lacks (`regcomp`,
+  `scandir`, `popen`, ...), was built with the protector, so the driver links
+  a small runtime for it into every program and library. Its two symbols are
+  weak and hidden: define your own to replace them.
+- **`-femulated-tls`**: the 6.5.0 loader has no thread-local storage segment.
+- **`-D_QNX_SOURCE`**: as `bb10-cc` passes it. Under a strict C standard
+  (`-std=c11` rather than `gnu11`) QNX's headers hide POSIX without it.
+- **`-mstack-alignment=4`**: 6.5.0 only guarantees a 4-byte aligned stack, so
+  code that needs more, such as SSE code, realigns it itself.
+
+Only C is supported, and only the system libraries: the x86 Qt and Cascades
+libraries are left out of the image.
+
 ## Install on a phone
 
 **If the phone is rooted with bb10mt, use the phone's own installer.** It is
@@ -178,7 +229,8 @@ assume about QNX:
   runs moc on a `Q_OBJECT` class and links every runtime helper against Qt.
 
 - `examples/calculator/` — example source, assets, CMake definition, and BAR descriptor
-- `docker/` — shared compiler/linker setup and generic build helpers
+- `docker/` — shared compiler/linker setup and generic build helpers, and the
+  QNX 6.5.0 x86 driver, name check and name lists
 - `tools/` — host-side Docker wrapper, project checker and rooted-phone installer
 - `Dockerfile` — self-contained builder image definition
 - `docker-bake.hcl` — Buildx target for building/tagging the image

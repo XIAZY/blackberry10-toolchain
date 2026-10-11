@@ -50,7 +50,9 @@ RUN dd if=/tmp/bbndk-installer.bin of=/tmp/resource.zip \
 FROM debian:trixie-slim AS bb10-target
 
 # This archive contains the host-independent BB10 10.3.1 QNX sysroot:
-# Cascades/Qt headers, ARM libraries, and the QNX CRT objects.
+# Cascades/Qt headers, ARM libraries, and the QNX CRT objects. Its x86 half
+# (the simulator's) is what qnx65-cc builds QNX 6.5.0 programs against; the
+# Qt and Cascades libraries of that half are left out.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends unzip && \
     rm -rf /var/lib/apt/lists/*
@@ -65,9 +67,16 @@ RUN mkdir -p /sdk && \
         'target_10_3_1_995/qnx6/armle-v7/*' \
         'target_10_3_1_995/target-override/usr/include/*' \
         'target_10_3_1_995/target-override/armle-v7/*' \
+        'target_10_3_1_995/qnx6/x86/lib/*' \
+        'target_10_3_1_995/qnx6/x86/usr/lib/*' \
+        -x 'target_10_3_1_995/qnx6/x86/usr/lib/qt4/*' \
+           'target_10_3_1_995/qnx6/x86/usr/lib/libbb*' \
+           'target_10_3_1_995/qnx6/x86/usr/lib/libQt*' \
         -d /sdk && \
     test -f /sdk/target_10_3_1_995/qnx6/usr/include/bb/cascades/Application && \
     test -f /sdk/target_10_3_1_995/qnx6/armle-v7/lib/crt1.o && \
+    test -f /sdk/target_10_3_1_995/qnx6/x86/lib/crt1.o && \
+    test -f /sdk/target_10_3_1_995/qnx6/x86/lib/libc.so.3 && \
     test -e /sdk/target_10_3_1_995/qnx6/armle-v7/usr/lib/libbbcascades.so
 
 FROM debian:trixie-slim AS binutils-build
@@ -146,10 +155,11 @@ ADD --checksum=sha256:96f833c6ad99a3e8e1d9aca5f439b8fd2c7efdcf83b664e0af1c0712c5
     /tmp/llvm.tar.xz
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends clang cmake make xz-utils && \
+    apt-get install -y --no-install-recommends clang cmake llvm make xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=binutils-build /opt/bb10-toolchain/ /opt/bb10-toolchain/
+COPY --from=bb10-target /sdk/target_10_3_1_995/qnx6/usr/include/ /tmp/qnx6-include/
 
 RUN mkdir -p /tmp/src && cd /tmp/src && \
     tar -xJf /tmp/compiler-rt.tar.xz && \
@@ -181,6 +191,46 @@ RUN mkdir -p /tmp/src && cd /tmp/src && \
             grep -q " T $helper\$" || { echo "missing $helper" >&2; exit 1; }; \
     done
 
+# QNX 6.5.0 x86 (qnx65-cc): the SDK's x86 half has no libgcc and no
+# crtbegin/crtend. compiler-rt's builtins supply the 64-bit arithmetic and
+# emulated thread-local storage (__emutls_get_address); its crtbegin/crtend,
+# built without CRT_HAS_INITFINI_ARRAY, run constructors from .ctors, which is
+# the only way the 6.5.0 loader runs them. The flags are qnx65-cc's.
+RUN cd /tmp/src && \
+    flags="-march=i486 -mstack-alignment=4 -fno-omit-frame-pointer -fno-stack-protector \
+        -fPIC -O2 -nostdinc -U__linux__ -U__linux -Ulinux -U__gnu_linux__ -Uunix -U__FLOAT128__ \
+        -U__SIZEOF_FLOAT128__ -D__QNX__ -D__QNXNTO__ -D__unix__ -D__unix -D__ELF__ -D__X86__ -D__i386__ \
+        -D__LITTLEENDIAN__ -D_QNX_SOURCE -Dstatic_assert=_Static_assert \
+        -isystem $(clang -print-resource-dir)/include -isystem /tmp/qnx6-include" && \
+    flags=$(echo $flags) && \
+    cmake -S "compiler-rt-${LLVM_VERSION}.src/lib/builtins" -B /tmp/build-x86 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_SYSTEM_NAME=Linux \
+        -DCMAKE_SYSTEM_PROCESSOR=i386 \
+        -DCMAKE_C_COMPILER=clang \
+        -DCMAKE_ASM_COMPILER=clang \
+        -DCMAKE_C_COMPILER_TARGET=i386-pc-linux-gnu \
+        -DCMAKE_ASM_COMPILER_TARGET=i386-pc-linux-gnu \
+        -DCMAKE_C_FLAGS="$flags" \
+        -DCMAKE_ASM_FLAGS="$flags" \
+        -DCMAKE_AR="$(command -v llvm-ar)" \
+        -DCMAKE_NM="$(command -v llvm-nm)" \
+        -DCMAKE_RANLIB="$(command -v llvm-ranlib)" \
+        -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+        -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+        -DCOMPILER_RT_BUILTINS_HIDE_SYMBOLS=ON \
+        -DCOMPILER_RT_OS_DIR=qnx65 \
+        -DLLVM_CMAKE_DIR=/tmp/src/llvm/cmake/modules && \
+    cmake --build /tmp/build-x86 -j"$(nproc)" --target clang_rt.builtins-i386 && \
+    install -D -m 644 /tmp/build-x86/lib/qnx65/libclang_rt.builtins-i386.a \
+        /out/qnx65-x86/libclang_rt.builtins-i386.a && \
+    for crt in crtbegin crtend; do \
+        clang --target=i386-pc-linux-gnu $flags -fno-use-init-array \
+            -c "compiler-rt-${LLVM_VERSION}.src/lib/builtins/$crt.c" -o "/out/qnx65-x86/$crt.o" || exit 1; \
+    done && \
+    llvm-nm /out/qnx65-x86/libclang_rt.builtins-i386.a 2>/dev/null | grep -q " [TW] __emutls_get_address\$" && \
+    llvm-readelf -S /out/qnx65-x86/crtbegin.o | grep -q "\.ctors"
+
 FROM debian:trixie-slim AS bb10-builder
 
 ARG BINUTILS_VERSION
@@ -195,6 +245,8 @@ RUN apt-get update && \
         clang \
         cmake \
         default-jre-headless \
+        lld \
+        llvm \
         make \
         python3 \
         unzip \
@@ -215,6 +267,10 @@ COPY docker/bb10-toolchain.cmake /opt/bb10-toolchain.cmake
 COPY docker/BB10LinkRules.cmake /opt/bb10-cmake/BB10LinkRules.cmake
 COPY docker/BB10Qt4.cmake /opt/bb10-cmake/BB10Qt4.cmake
 COPY docker/bb10-cc /usr/local/bin/bb10-cc
+COPY docker/qnx65-cc /usr/local/bin/qnx65-cc
+COPY docker/qnx65-check-names /usr/local/bin/qnx65-check-names
+COPY docker/qnx65-symbols/ /opt/bb10-toolchain/share/qnx65-symbols/
+COPY docker/qnx65-stack-protector.c /opt/bb10-toolchain/share/qnx65-stack-protector.c
 COPY docker/selftest/ /opt/bb10-cmake/selftest/
 COPY tools/check-project.py /usr/local/bin/bb10-check-project
 
@@ -231,9 +287,13 @@ RUN chmod +x \
         /usr/local/bin/bb10-build \
         /usr/local/bin/bb10-toolchain-doctor \
         /usr/local/bin/bb10-check-project \
-        /usr/local/bin/bb10-cc && \
+        /usr/local/bin/bb10-cc \
+        /usr/local/bin/qnx65-cc \
+        /usr/local/bin/qnx65-check-names && \
     ln -s bb10-cc /usr/local/bin/bb10-c++ && \
     /usr/local/sbin/install-bb10-sdk && \
+    qnx65-cc -O2 -fPIC -c /opt/bb10-toolchain/share/qnx65-stack-protector.c \
+        -o /opt/bb10-toolchain/lib/qnx65-x86/stack-protector.o && \
     clang --version | grep -q "clang version ${LLVM_VERSION%%.*}\." || \
         { echo "clang is not LLVM ${LLVM_VERSION%%.*}; update LLVM_VERSION" >&2; exit 1; } && \
     bb10-toolchain-doctor --image-build
